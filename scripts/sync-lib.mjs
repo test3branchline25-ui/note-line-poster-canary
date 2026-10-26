@@ -497,6 +497,15 @@ export function issueMarker(kind) {
 }
 
 /**
+ * 自動更新が立てた Issue か（本文に、どれかの種類の目印があるか）。
+ * ★顧客が自分で作った Issue を閉じないため、知っている種類の目印だけを見る
+ */
+export function isAutoUpdateIssue(issue) {
+  if (!issue || issue.pull_request || typeof issue.body !== 'string') return false;
+  return Object.keys(FAILURE_KINDS).some((k) => issue.body.includes(issueMarker(k)));
+}
+
+/**
  * Issue のタイトルと本文を作る。
  * ★秘密を出さない（鍵・トークンはそもそも扱わない。コマンドの出力も貼らない＝ログへのリンクだけ）
  */
@@ -521,7 +530,7 @@ export function buildIssue({ kind, details = [], version, runUrl }) {
   lines.push(
     '**次にやること**：提供元（このシステムを渡した担当者）にご連絡ください。この Issue の URL を伝えていただくのが早いです。',
     '',
-    '- 自動更新は毎日1回、もう一度試します。原因が解消されるまで、同じ理由ではこの Issue に追記します',
+    '- 自動更新は毎日1回、もう一度試します。原因が解消されるまで、同じ理由ではこの Issue に追記します。解消したら自動で閉じます',
     '- 止めておきたいときは、リポジトリの直下に `.sync-pin` という名前のファイル（中身は空で可）を作ってください',
   );
   if (runUrl) lines.push('', `実行の記録：${runUrl}`);

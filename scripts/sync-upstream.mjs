@@ -32,7 +32,7 @@ import { fileURLToPath } from 'node:url';
 import {
   MANIFEST_FILE, UPSTREAM_FILE, PIN_FILE, WRANGLER_FILE,
   parseManifest, parseUpstreamConfig, hashTree, hashPaths, planSync, checkMigrations,
-  mergeWrangler, serializeManifest, buildIssue, issueMarker, SymlinkError, assertNoSymlink,
+  mergeWrangler, serializeManifest, buildIssue, issueMarker, isAutoUpdateIssue, SymlinkError, assertNoSymlink,
   NAME_AGNOSTIC_FILE, mergePackageJson, isMain,
 } from './sync-lib.mjs';
 
@@ -156,6 +156,7 @@ export async function runSync(deps) {
 
     if (plan.actions.length === 0 && wranglerOut === null) {
       log(`変更はありません（取り込み元の版: ${version}）。`);
+      await resolveIssues({ version, env: { ...env, GITHUB_TOKEN: token }, fetchImpl: deps.fetch ?? globalThis.fetch, log });
       return { status: 'no-change', code: 0, version };
     }
 
@@ -215,6 +216,7 @@ export async function runSync(deps) {
     }
 
     log(`更新しました: ${version}（${summarize(plan.actions)}${wranglerOut ? '・wrangler.json' : ''}）`);
+    await resolveIssues({ version, env: { ...env, GITHUB_TOKEN: token }, fetchImpl: deps.fetch ?? globalThis.fetch, log });
     return { status: 'updated', code: 0, version, actions: plan.actions };
   } catch (e) {
     if (!(e instanceof SyncStop)) throw e;
@@ -234,24 +236,71 @@ export async function runSync(deps) {
  * ★同じ種類で開いている Issue があれば、新しく作らずコメントで追記する（毎日 Issue が増えないように）
  * ★Issue を作れなくても、同期の結果（失敗＝何も変えていない）は変わらない。ログに残して終わる
  */
-export async function reportFailure({ kind, details, version, env, fetchImpl, log = () => {} }) {
+/** GitHub API を呼ぶための情報。GitHub の外（鍵やリポジトリ名が無い）なら null */
+function githubContext(env, fetchImpl) {
   const token = env.GITHUB_TOKEN;
   const repo = env.GITHUB_REPOSITORY;
-  if (!token || !repo || typeof fetchImpl !== 'function') {
+  if (!token || !repo || typeof fetchImpl !== 'function') return null;
+  const runUrl = env.GITHUB_SERVER_URL && env.GITHUB_RUN_ID
+    ? `${env.GITHUB_SERVER_URL}/${repo}/actions/runs/${env.GITHUB_RUN_ID}` : undefined;
+  return {
+    runUrl,
+    api: `${env.GITHUB_API_URL || 'https://api.github.com'}/repos/${repo}`,
+    headers: {
+      authorization: `Bearer ${token}`,
+      accept: 'application/vnd.github+json',
+      'content-type': 'application/json',
+      'x-github-api-version': '2022-11-28',
+      'user-agent': 'note-line-poster-auto-update',
+    },
+  };
+}
+
+/**
+ * 同期が成功したとき（更新した・変更なし）に、自動更新が立てた Issue を「解消しました」とコメントして閉じる。
+ * ★閉じるのは目印（<!-- auto-update:… -->）を持つものだけ。顧客が自分で作った Issue は触らない
+ * ★見るのは開いている最初の100件（重複判定と同じ範囲）
+ * ★閉じられなくても（権限・通信）、同期の成功は変えない。警告をログに出して終わる
+ * ★止められている日（.sync-pin）・取り込み元が取れなかった日は呼ばない（解消していないため）
+ */
+export async function resolveIssues({ version, env, fetchImpl, log = () => {} }) {
+  const gh = githubContext(env, fetchImpl);
+  if (!gh) return { action: 'skipped', closed: [] };
+  const closed = [];
+  try {
+    const listRes = await fetchImpl(`${gh.api}/issues?state=open&per_page=100`, { headers: gh.headers });
+    if (!listRes.ok) throw new Error(`Issue 一覧の取得に失敗（${listRes.status}）`);
+    const issues = await listRes.json();
+    const targets = Array.isArray(issues) ? issues.filter(isAutoUpdateIssue) : [];
+    const body = [
+      `自動更新が解消しました（取り込んだ版：${version}）。この Issue を閉じます。`,
+      gh.runUrl ? `\n実行の記録：${gh.runUrl}` : '',
+    ].join('');
+    for (const issue of targets) {
+      const c = await fetchImpl(`${gh.api}/issues/${issue.number}/comments`, { method: 'POST', headers: gh.headers, body: JSON.stringify({ body }) });
+      if (!c.ok) throw new Error(`Issue #${issue.number} へのコメントに失敗（${c.status}）`);
+      const res = await fetchImpl(`${gh.api}/issues/${issue.number}`, {
+        method: 'PATCH', headers: gh.headers, body: JSON.stringify({ state: 'closed', state_reason: 'completed' }),
+      });
+      if (!res.ok) throw new Error(`Issue #${issue.number} を閉じられませんでした（${res.status}）`);
+      closed.push(issue.number);
+      log(`解消した Issue #${issue.number} を閉じました`);
+    }
+    return { action: closed.length ? 'closed' : 'none', closed };
+  } catch (e) {
+    log(`::warning::自動更新: 解消した Issue を閉じられませんでした（${String(e?.message ?? e)}）。同期そのものは成功しています`);
+    return { action: 'error', closed };
+  }
+}
+
+export async function reportFailure({ kind, details, version, env, fetchImpl, log = () => {} }) {
+  const gh = githubContext(env, fetchImpl);
+  if (!gh) {
     log('（GitHub の外で動いているため、Issue は作りません）');
     return { action: 'skipped' };
   }
-  const runUrl = env.GITHUB_SERVER_URL && env.GITHUB_RUN_ID
-    ? `${env.GITHUB_SERVER_URL}/${repo}/actions/runs/${env.GITHUB_RUN_ID}` : undefined;
+  const { runUrl, api, headers } = gh;
   const { title, body } = buildIssue({ kind, details, version, runUrl });
-  const api = `${env.GITHUB_API_URL || 'https://api.github.com'}/repos/${repo}`;
-  const headers = {
-    authorization: `Bearer ${token}`,
-    accept: 'application/vnd.github+json',
-    'content-type': 'application/json',
-    'x-github-api-version': '2022-11-28',
-    'user-agent': 'note-line-poster-auto-update',
-  };
   try {
     const listRes = await fetchImpl(`${api}/issues?state=open&per_page=100`, { headers });
     if (!listRes.ok) throw new Error(`Issue 一覧の取得に失敗（${listRes.status}）`);

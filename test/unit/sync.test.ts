@@ -442,9 +442,14 @@ describe('runSync（実行本体）', () => {
   };
 
   const fetchCalls: string[] = [];
+  const fetchBodies: string[] = [];
+  let openIssues: unknown[] = [];
+  let failClose = false;
   const fetchMock = (async (url: string, init?: RequestInit) => {
     fetchCalls.push(`${init?.method ?? 'GET'} ${url}`);
-    if (!init?.method) return new Response('[]', { status: 200 });
+    if (init?.body) fetchBodies.push(String(init.body));
+    if (!init?.method) return new Response(JSON.stringify(openIssues), { status: 200 });
+    if (init.method === 'PATCH') return new Response('{}', { status: failClose ? 403 : 200 });
     return new Response('{"number":1}', { status: 201 });
   }) as typeof fetch;
 
@@ -462,6 +467,9 @@ describe('runSync（実行本体）', () => {
     calls = [];
     opts = {};
     logs.length = 0;
+    openIssues = [];
+    failClose = false;
+    fetchBodies.length = 0;
     fetchCalls.length = 0;
   });
   afterEach(() => rmSync(work, { recursive: true, force: true }));
@@ -517,7 +525,7 @@ describe('runSync（実行本体）', () => {
     expect(calls.find((c) => c.args.includes('commit'))!.args).toContain('chore: 自動更新 20261027-bbbbbbb');
     // 取り込みは公開リポジトリの stable を depth 1 で
     expect(calls[0].args).toEqual(expect.arrayContaining(['--depth', '1', '--branch', 'stable', 'https://github.com/owner/tpl.git']));
-    expect(fetchCalls).toEqual([]);                            // 成功時は Issue を作らない
+    expect(fetchCalls).toEqual(['GET https://api.github.com/repos/someone/my-repo/issues?state=open&per_page=100']);   // 成功時は Issue を作らない（解消済みの Issue を探すだけ）
     // 一時フォルダは片付ける
     expect(readdirSync(work).sort()).toEqual(['repo', 'up']);
   });
@@ -632,6 +640,73 @@ describe('runSync（実行本体）', () => {
     expect(readTree(repo)).toEqual(before);
   });
 
+  const AUTO_ISSUE = { number: 11, body: `${issueMarker('conflict')}\n## 自動更新が止まっています` };
+  const MY_ISSUE = { number: 12, body: 'メニューの色を変えたい（顧客が自分で作った Issue）' };
+  const MY_ISSUE_MENTIONING = { number: 13, body: 'auto-update が止まった件の相談です' };
+  const PR = { number: 14, body: issueMarker('conflict'), pull_request: {} };
+
+  it('★同期に成功したら（更新した）、自動更新が立てた Issue だけを「解消しました」とコメントして閉じる', async () => {
+    makeUpstream(NEW_FILES);
+    makeRepo();
+    openIssues = [AUTO_ISSUE, MY_ISSUE, MY_ISSUE_MENTIONING, PR];
+    const r = await runSync({
+      cwd: repo, exec, fetch: fetchMock, tmpRoot: work, log: (m: string) => logs.push(m),
+      env: { GITHUB_TOKEN: 'dummy-token', GITHUB_REPOSITORY: 'someone/my-repo', GITHUB_SERVER_URL: 'https://github.com', GITHUB_RUN_ID: '99' },
+    });
+    expect(r.status).toBe('updated');
+    expect(fetchCalls).toEqual([
+      'GET https://api.github.com/repos/someone/my-repo/issues?state=open&per_page=100',
+      'POST https://api.github.com/repos/someone/my-repo/issues/11/comments',
+      'PATCH https://api.github.com/repos/someone/my-repo/issues/11',
+    ]);
+    const comment = JSON.parse(fetchBodies[0]).body as string;
+    expect(comment).toMatch(/解消しました/);
+    expect(comment).toContain('20261027-bbbbbbb');
+    expect(comment).toContain('https://github.com/someone/my-repo/actions/runs/99');
+    // ★コメントにも送信内容にも秘密が出ない
+    for (const b of fetchBodies) expect(b).not.toContain('dummy-token');
+    expect(JSON.parse(fetchBodies[1])).toEqual({ state: 'closed', state_reason: 'completed' });
+  });
+
+  it('同期に成功したら（変更なし）も閉じる', async () => {
+    makeUpstream(OLD_FILES, MY_WRANGLER.replace('"my-poster"', '"note-line-poster"'));
+    makeRepo();
+    openIssues = [AUTO_ISSUE, MY_ISSUE];
+    expect((await run()).status).toBe('no-change');
+    expect(fetchCalls.filter((c) => c.startsWith('PATCH'))).toEqual(['PATCH https://api.github.com/repos/someone/my-repo/issues/11']);
+  });
+
+  it('★閉じるのに失敗しても（権限など）、同期は成功のまま。警告をログに出す', async () => {
+    makeUpstream(NEW_FILES);
+    makeRepo();
+    openIssues = [AUTO_ISSUE];
+    failClose = true;
+    const r = await run();
+    expect(r).toMatchObject({ status: 'updated', code: 0 });
+    expect(logs.join('\n')).toMatch(/::warning::.*閉じられませんでした/);
+  });
+
+  it('★止められている日（.sync-pin）・取り込み元を取れなかった日は閉じない（解消していないため）', async () => {
+    makeUpstream(NEW_FILES);
+    makeRepo({ '.sync-pin': '' });
+    openIssues = [AUTO_ISSUE];
+    expect((await run()).status).toBe('pinned');
+    expect(fetchCalls).toEqual([]);
+
+    rmSync(join(repo, '.sync-pin'));
+    opts.failClone = true;
+    expect((await run()).status).toBe('fetch-failed');
+    expect(fetchCalls).toEqual([]);
+  });
+
+  it('★失敗した日は閉じない（新しく立てる／追記するだけ）', async () => {
+    makeUpstream(NEW_FILES);
+    makeRepo({ 'src/a.ts': '// 自分で直した\n' });
+    openIssues = [AUTO_ISSUE];
+    expect((await run()).status).toBe('failed');
+    expect(fetchCalls.some((c) => c.startsWith('PATCH'))).toBe(false);
+  });
+
   it('変更が無ければ何もしない（コミットを作らない・検査も走らせない）', async () => {
     makeUpstream(OLD_FILES, MY_WRANGLER.replace('"my-poster"', '"note-line-poster"'));
     makeRepo();
@@ -652,7 +727,7 @@ describe('runSync（実行本体）', () => {
     const r = await run();
     expect(r.status).toBe('no-change');
     expect(readTree(repo)).toEqual(before);
-    expect(fetchCalls).toEqual([]);
+    expect(fetchCalls).toEqual(['GET https://api.github.com/repos/someone/my-repo/issues?state=open&per_page=100']);
   });
 
   it('★package.json: 顧客の name だけ違う（配備ボタンが書き換える）→ 衝突にならず同期でき、name は保持', async () => {
