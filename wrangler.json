@@ -1,0 +1,38 @@
+{
+  "name": "note-line-poster-canary",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-01",
+  "compatibility_flags": [
+    "nodejs_compat"
+  ],
+  "observability": {
+    "enabled": true
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "note-line-poster-canary",
+      "database_id": "31e90667-2d92-4ecc-8c3b-a9b7b7fb76b9",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "kv_namespaces": [
+    {
+      "binding": "KV",
+      "id": "dd7231e91d1a4fd2981801d99b257576"
+    }
+  ],
+  "workflows": [
+    {
+      "binding": "GENERATE",
+      "name": "generate-article",
+      "class_name": "GenerateArticleWorkflow"
+    }
+  ],
+  "triggers": {
+    "crons": [
+      "0 0 * * *",
+      "*/15 * * * *"
+    ]
+  }
+}
