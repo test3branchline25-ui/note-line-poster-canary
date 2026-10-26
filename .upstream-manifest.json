@@ -1,5 +1,5 @@
 {
-  "version": "20261026-9ccb9f3-dirty",
+  "version": "20261026-9ccb9f3-dirty-fbc61f04",
   "files": {
     ".dev.vars.example": "2455b3a5f9d137531e76beccb4a08c17cb649d67baf7800824d2cf5f3cbfa3b8",
     "README.md": "2e536ea3304505b866ebc068364f33f759a2df79313ab042023070f0f692ff53",
@@ -45,7 +45,7 @@
     "scripts/setup-line.mjs": "ae465888d2c93bdae60cd953d8e1cfdae948ffd8319c23996b6c211f9069ccc0",
     "scripts/setup-vars.mjs": "a159ba67cba086fb257ca40fe9a46c4c94de611cbcb779611ceef7d43597195d",
     "scripts/setup.mjs": "973faeed219f8978bbca9598a6bcf2afb8b69681d57d0ad5b024396b5adbc377",
-    "scripts/sync-lib.mjs": "b3b5a219aaf0a9ffe632d92717806ea0df08d2c7fcae819217c6e6461f94e259",
+    "scripts/sync-lib.mjs": "d55ead67ab6d4a3cd308cd5a31207588b6088714a17a8131e7ecdfb23d75ca74",
     "scripts/sync-upstream.mjs": "640a95068b04aebba348762229c79d07c067d47d8dfa8961ef62f04ac4678471",
     "src/adapters/agent/router.ts": "ca97be39dccdb3483ae12cf64ed05ac4555278cc74f3f6ea50ca0689aecdd6fa",
     "src/adapters/connect/router.ts": "ff91f469cf06af1b67c01fb484aa3bd15c1029c8027de660f6e003a4c9cfaf7f",
@@ -127,7 +127,7 @@
     "src/ports/publisher/note/public.ts": "1598cf37b0e1d2e9ab3477bbc272515c02d8e7fdff6da3ec9d159b50dc5bc851",
     "src/ports/storage/db.ts": "a104a075779b210b6cd536aeae7d9a6cad79fa2bbb1216c5db021c218c867b9e",
     "src/ports/storage/images.ts": "559336785d1cb763e4bcb80736e454daa84d86176d9416ed0901b0d89393a605",
-    "src/version.ts": "7559d348d0dee39d111428813104e4a04df29eb049101ce7ba21a02565c11e8c",
+    "src/version.ts": "17665a7c476cf847c6433e0638d1afcf5c49d5a51436f47ac4a2f14b6590b995",
     "src/workflows/generate-article.ts": "7d729fdc3ca836953a106dfe2deab58e3e6259b351b07d1f51b2e1bd2f44c77a",
     "src/workflows/generate-step.ts": "8a1de8e2c854e9dcdc6b04914acc792c61e5096ad159b56f3ac459aea1bdc4da",
     "test/unit/access.test.ts": "616308c5887426a146240ac38d1799079ba010685ceb338f30998901e1177ab8",
@@ -165,7 +165,7 @@
     "test/unit/setup-vars.test.ts": "f591c441a5d98f4c89b10bc8124c1cd1808989672da27ee8b60725fe804171c7",
     "test/unit/signature.test.ts": "d09c08e68feee0efbc18346678af094f46c13bf4ead522d309c0c46b7234a414",
     "test/unit/state.test.ts": "c81d47ebf1dfbd347351568e94b35ee84d91a6ea0da7a62774a67cfae20ecb71",
-    "test/unit/sync.test.ts": "d3c0488126c4eec9b4aeeb3e2bb7cd4df23de6ec07d9a3e2847d84fbec267af3",
+    "test/unit/sync.test.ts": "f057f2e4c6d56a9edaf3d86ac00cd57a39f829b5698e9aaeccb63e600a772ad9",
     "test/unit/thumbnail.test.ts": "63fa39c1762b7efca797ca65b464b67da409aadb41838c5e50ce7ad8206cc3a3",
     "tsconfig.json": "90a1825c257c433eaaa5bf8709a13aa23a94446e7fdc164650c2ed00eb694ede",
     "vitest.config.ts": "a7afd942c6ec61262ee5998906d49fcb5d168f50effffa9404a025782858d54b"

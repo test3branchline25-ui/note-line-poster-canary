@@ -190,6 +190,24 @@ export function hashPaths(rootDir, paths) {
   return files;
 }
 
+/** 版の文字列を書き込むファイル（中身のハッシュからは外す。版を刻むと中身が変わるため） */
+export const VERSION_FILE = 'src/version.ts';
+
+/**
+ * ★配布物の中身の全体ハッシュ（版の文字列に入れる）。
+ *   範囲と数え方はマニフェストと同じ（hashTree＝同期の対象・package.json は name 除外）。
+ *   ただし src/version.ts は外す（版を刻む前後で値が変わらないように）。
+ *   パスを並べ替えてから数えるので、ファイルを作った順番には依らない。
+ */
+export function contentHashOf(files) {
+  const lines = Object.keys(files).filter((p) => p !== VERSION_FILE).sort().map((p) => `${p}\0${files[p]}\n`);
+  return hashContent(lines.join(''));
+}
+
+export function treeContentHash(rootDir) {
+  return contentHashOf(hashTree(rootDir));
+}
+
 /**
  * マニフェストを作る（配布物の組み立てと、同期の成功時の書き直しの両方で使う）。
  * ★キーは並べ替えて書く。差分が「中身の変化」だけになるようにするため

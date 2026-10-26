@@ -837,7 +837,7 @@ describe('自動更新の配布物の部品', () => {
   });
 
   it('版は 大元では dev、配布物では YYYYMMDD-<sha> の形', () => {
-    expect(VERSION).toMatch(/^(dev|\d{8}-[0-9a-z]+(-dirty)?)$/);
+    expect(VERSION).toMatch(/^(dev|\d{8}-[0-9a-z]+(-dirty)?(-[0-9a-f]{8})?)$/);
   });
 
   it('★/health が version を返す（既存の ok / checks は残す）', () => {
