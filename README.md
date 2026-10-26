@@ -1,4 +1,3 @@
-手書きの変更（実験）
 # note-line-poster
 
 LINE にネタを送るだけで、AI が SEO を意識した記事に仕上げて **note へ投稿**します。
