@@ -216,7 +216,8 @@ ${status.hasImageKey ? '' : '<div class="note">OpenAI の API キーが未登録
  <label style="margin-top:.4rem"><input type="checkbox" name="inline_clear" value="1" style="width:auto"> 文中の画像用のルールを消す</label>
 
  <h2>参考画像（見た目や雰囲気をそろえたい画像）</h2>
- <div class="note">登録すると、サムネと文中の画像の両方で、見た目や雰囲気をそろえる参考に使います。人物・キャラクター、商品、お店の雰囲気、過去のサムネの見本など、なんでも登録できます。
+ <div class="note">登録すると、サムネと文中の画像の両方で、見た目や雰囲気をそろえる参考に使います。人物・キャラクター、商品、お店の雰囲気、過去のサムネの見本など、なんでも登録できます。<br>
+ <b>ご自身や自社に権利がある画像だけを登録してください（他人の顔写真・有名人・他社の商品やロゴ・アニメなどのキャラクターは不可）。</b>画像の中のロゴや文字は再現しません。
  PNG・JPEG・WebP、1枚 ${REF_MAX_BYTES / 1024 / 1024}MB まで・合わせて ${REF_MAX_COUNT} 枚まで。画像そのものはこの画面に表示しません。</div>
  ${r.refs.length ? `<ul>${refRows}</ul>` : '<p class="lead">まだ登録されていません。</p>'}
  <label for="ref_random" style="margin-top:1rem">参考画像の使い方</label>

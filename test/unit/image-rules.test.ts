@@ -1532,3 +1532,26 @@ describe('V6: 参考画像は人物・キャラクターに限らない', () => 
     }
   });
 });
+
+
+describe('V6 源蔵レビュー必須: ロゴは参考画像にあっても再現しない／権利の注意', () => {
+  it('★REFS_SYSTEM・REFERENCE_CLAUSE・RULES_PRIORITY_SYSTEM がそろって「ロゴは再現しない」（人物の例外は維持）', () => {
+    const refs = buildPlanSystem({ titleMode: 'none', hasRules: false, hasRefs: true });
+    expect(refs).toContain('ロゴ・商標・ブランド名・文字は参考画像にあっても再現しない');
+    expect(REFERENCE_CLAUSE).toContain('参考画像の中のロゴや文字は描かない');
+    const rules = buildPlanSystem({ titleMode: 'none', hasRules: true, hasRefs: true });
+    expect(rules).toContain('実在のロゴ・商標・ブランド名を描かない（参考画像の中にあっても描かない）');
+    expect(rules).toContain('参考画像として渡された人物は除く');
+    expect(rules).not.toContain('参考画像として渡された人物・物は除く');
+    expect(INSPECT_SYSTEM).toContain('ロゴ・商標');
+  });
+
+  it('★/setup の参考画像の節に、権利の注意が出る', async () => {
+    const { env } = await runningEnv();
+    const html = await (await setupRouter.request('/setup', {}, env)).text();
+    const section = html.slice(html.indexOf('<h2>参考画像'), html.indexOf('code_all'));
+    expect(section).toContain('ご自身や自社に権利がある画像だけを登録してください');
+    expect(section).toContain('他人の顔写真・有名人・他社の商品やロゴ・アニメなどのキャラクターは不可');
+    expect(section).toContain('画像の中のロゴや文字は再現しません');
+  });
+});
