@@ -384,6 +384,17 @@ export class Db {
   }
 
   /**
+   * 記事が最後に「note に出ている状態（published / drafted）」を離れたときの記録。
+   * ★修正を「やめる」で元に戻すときに、戻り先と戻す中身（修正開始時の控え）をここから読む（core/article/cancel.ts）。
+   */
+  async getLastExitFromNote(id: string): Promise<{ from_state: ArticleState; to_state: ArticleState; detail_json: string | null } | null> {
+    return this.d1.prepare(`SELECT from_state, to_state, detail_json FROM article_events
+      WHERE article_id = ? AND from_state IN ('published', 'drafted')
+      ORDER BY created_at DESC, rowid DESC LIMIT 1`)
+      .bind(id).first<{ from_state: ArticleState; to_state: ArticleState; detail_json: string | null }>();
+  }
+
+  /**
    * 本人の判断を待っている記事を1件返す。
    * ★これがある間は新しい記事を作らせない（誤って別記事が生まれるのを防ぐ）。
    */
@@ -712,7 +723,16 @@ export class Db {
       .first<{ id: string; raw_text: string; prompt_snippet: string | null }>();
   }
 
-  async saveContext(tenantId: string, rawText: string, structured: unknown, promptSnippet: string): Promise<string> {
+  /** 設定画面（/setup）でナレッジを見せるとき用。最終更新日時も返す */
+  async getActiveContextDetail(tenantId: string): Promise<{ id: string; raw_text: string; prompt_snippet: string | null; updated_at: string } | null> {
+    return this.d1
+      .prepare('SELECT id, raw_text, prompt_snippet, updated_at FROM tenant_context WHERE tenant_id = ? AND is_active = 1 ORDER BY updated_at DESC LIMIT 1')
+      .bind(tenantId)
+      .first<{ id: string; raw_text: string; prompt_snippet: string | null; updated_at: string }>();
+  }
+
+  /** @param by 監査ログの actor（LINE からは 'line'、設定画面からは 'web:owner' など） */
+  async saveContext(tenantId: string, rawText: string, structured: unknown, promptSnippet: string, by = 'line'): Promise<string> {
     const id = newId();
     const now = nowIso();
     // 過去のものは残すが無効化する（履歴として追える）
@@ -723,7 +743,7 @@ export class Db {
                 VALUES (?, ?, ?, ?, ?, 1, ?, ?)`)
       .bind(id, tenantId, rawText, JSON.stringify(structured), promptSnippet, now, now)
       .run();
-    await this.audit(tenantId, 'context.saved', 'line', null, 'ok');
+    await this.audit(tenantId, 'context.saved', by, null, 'ok');
     return id;
   }
 

@@ -27,8 +27,9 @@ import { parseHeadings, parse as parsePlaceholders } from '../../core/article/pl
 import { buildPreview } from './messages/preview';
 import { buildFullText } from './messages/fulltext';
 import { buildMenu, buildArticleList, buildArticleActions } from './messages/menu';
-import { setMode, getMode, clearMode, parseIndex, normalizeCommand } from './mode';
-import { COMMANDS } from './commands';
+import { setMode, getMode, clearMode, parseIndex, parseDeleteRequest, normalizeCommand } from './mode';
+import { COMMANDS, isPublishApproval, isDraftRequest, isCancelRequest, isHoldRequest, normalizeReply } from './commands';
+import { revertOrCancel, cancelReplyText, notReadyToPublishMessage } from '../../core/article/cancel';
 import { resolveNoteSession, persistRefreshedCookie } from '../../core/session/resolve';
 import { issuePairingCode } from '../../core/session/pairing';
 import { loadNoteSession, disconnectNoteSession } from '../../core/session/store';
@@ -64,7 +65,10 @@ import {
 } from '../../core/line/members';
 import { otherWorkInProgress } from '../../core/article/ownership';
 import { buildProvisionalSnippet } from '../../core/generation/context';
-import { buildKnowledgeReceived } from './messages/knowledge';
+import {
+  buildKnowledgeReceived, buildKnowledgeHub, buildKnowledgeFirst, buildKnowledgeFull, buildKnowledgeModify,
+  buildKnowledgeDeletePicker,
+} from './messages/knowledge';
 import { issueSetupCode } from '../../core/setup/state';
 import { resolveMasterKey } from '../../core/setup/masterkey';
 import { validateIdeaLength } from '../../core/line/idea-input';
@@ -299,6 +303,17 @@ async function busyWithOther(d: ServiceDeps, userId: string, articleId: string) 
 /** 投稿者が、持ち主だけの操作をしようとしたとき */
 async function ownerOnly(line: LineClient, replyToken: string): Promise<void> {
   await line.reply(replyToken, [text(OWNER_ONLY_MESSAGE)]);
+}
+
+/** 投稿者が、ナレッジを消す・入れ替えようとしたとき（管理者もできるので「持ち主・管理者」と書く） */
+const KNOWLEDGE_POWER_ONLY_MESSAGE = 'ナレッジを消す・入れ替えるのは、持ち主・管理者だけができます。';
+
+/**
+ * 記事への返事（承認・下書き・保留）として読める短文か。
+ * ★ナレッジの書き足し待ちの最中に来ても、ナレッジには保存しない（源蔵レビュー必須1）。
+ */
+function isArticleReply(body: string): boolean {
+  return isPublishApproval(body) || isDraftRequest(body) || isHoldRequest(body);
 }
 
 // ── 管理者（V7）の小道具 ────────────────────────────────
@@ -537,6 +552,13 @@ async function handleText(
   if (COMMANDS.knowledge.test(cmd)) {
     return showContext(env, line, d, replyToken, userId);
   }
+  // ★2026-11 入口を「確認」（全文表示）と「修正」（書き足す・消す）の2つに分けた
+  if (COMMANDS.knowledgeView.test(cmd)) {
+    return showContextFull(env, line, d, replyToken, userId);
+  }
+  if (COMMANDS.knowledgeEdit.test(cmd)) {
+    return showContextModify(env, line, d, replyToken, userId);
+  }
   if (COMMANDS.newArticle.test(cmd)) {
     return startArticleInput(env, line, replyToken, userId);
   }
@@ -698,13 +720,51 @@ async function handleText(
     return deleteContextEntry(n, env, line, d, replyToken, userId);
   }
 
+  // ★ナレッジの書き足し待ちでも、記事への返事（「OK」「下書き」「公開しない」など）はナレッジに保存しない
+  //   （2026-11 源蔵レビュー必須1）。プレビュー待ちの最中に「ナレッジを修正」を押し、そのまま「OK」と
+  //   送ると、記事は公開されず「OK」がナレッジに入ってしまう。
+  //   ・やめる系 … 書き足しをやめるだけ（記事は取りやめない。ここで記事を消すと取り違えの害が大きい）
+  //   ・承認・下書き・保留 … 判断待ちの記事があれば、書き足し待ちを外して下の判断待ちの処理へ回す
+  //                         無ければ保存せず、書き足したいのかを聞き返す
+  let passToArticle = false;
   if (mode?.kind === 'ctx_new' || mode?.kind === 'ctx_append') {
     await clearMode(env.KV, DEFAULT_TENANT_ID, userId);
-    if (/^(やめ|キャンセル|中止)/.test(body)) {
-      await line.reply(replyToken, [text('登録をやめました。')]);
+    if (/^(やめ|キャンセル|中止)/.test(body) || isCancelRequest(body)) {
+      const pendingArticle = await d.db.findArticleAwaitingDecision(DEFAULT_TENANT_ID, me(d, userId));
+      await line.reply(replyToken, [text(
+        'ナレッジの登録をやめました。' +
+        (pendingArticle ? '\n確認待ちの記事は、そのまま残っています（記事をやめるときは、もう一度「やめる」と送ってください）。' : ''),
+      )]);
       return;
     }
-    return saveContext(body, mode.kind === 'ctx_append', env, line, d, replyToken, userId);
+    if (isArticleReply(body)) {
+      const pendingArticle = await d.db.findArticleAwaitingDecision(DEFAULT_TENANT_ID, me(d, userId));
+      if (pendingArticle) {
+        passToArticle = true;
+      } else {
+        await line.reply(replyToken, [textWithActions(
+          `「${body.slice(0, 20)}」は、ナレッジに書き足していません。\n\n` +
+          'ナレッジに書き足しますか？\n書き足す場合は、下のボタンを押してから内容を文章で送ってください。',
+          [
+            { label: '書き足す', data: 'action=ctx_append' },
+            { label: 'やめる', data: 'action=ctx_cancel' },
+          ],
+        )]);
+        return;
+      }
+    }
+    if (!passToArticle) {
+      // ★「ナレッジを修正」の最中の「3番を消す」は、書き足しではなく1件の削除として扱う（持ち主・管理者だけ）
+      const del = mode.kind === 'ctx_append' ? parseDeleteRequest(body) : null;
+      if (del) {
+        if (!power(d, userId)) {
+          await line.reply(replyToken, [text(`${KNOWLEDGE_POWER_ONLY_MESSAGE}\n書き足したいときは「ナレッジを修正」を押してから送ってください。`)]);
+          return;
+        }
+        return deleteContextEntry(del, env, line, d, replyToken, userId);
+      }
+      return saveContext(body, mode.kind === 'ctx_append', env, line, d, replyToken, userId);
+    }
   }
 
   if (mode?.kind === 'article_select') {
@@ -759,10 +819,14 @@ async function handleText(
 
   // 生成に失敗した記事があるなら、この発言は「やり直しの指示」
   if (active && active.state === 'failed') {
-    if (/^(やめ|キャンセル|中止|いいえ|新し)/.test(body)) {
-      await withdrawJobs(d, active.id);
-      await d.db.setState(active.id, 'failed', 'cancelled', `line:${userId}`);
-      await line.reply(replyToken, [text('前の記事は取りやめました。新しいネタを送ってください。')]);
+    if (isCancelRequest(body) || /^新しい?(ネタ|記事)/.test(normalizeReply(body))) {
+      const msg = await cancelOrRevert(d, active.id, userId, '前の記事は取りやめました。新しいネタを送ってください。');
+      await line.reply(replyToken, [text(msg)]);
+      return;
+    }
+    // 「いいえ」「まだ」だけの返事で作り直しを走らせない（AI の費用がかかるため）
+    if (isHoldRequest(body)) {
+      await line.reply(replyToken, [text('そのままにしておきます。\nもう一度作る場合は指示をそのまま送り、新しいネタにする場合は「やめる」と送ってください。')]);
       return;
     }
     await requestRewrite(d, active.id, body);
@@ -788,10 +852,9 @@ async function handleText(
       await line.reply(replyToken, [text('サムネイルの指定を外しました。')]);
       return;
     }
-    if (/^(やめ|キャンセル|中止)/.test(body)) {
-      await withdrawJobs(d, active.id);
-      await d.db.setState(active.id, active.state, 'cancelled', `line:${userId}`);
-      await line.reply(replyToken, [text('作成中の記事を取りやめました。新しいネタを送ってください。')]);
+    if (isCancelRequest(body)) {
+      const msg = await cancelOrRevert(d, active.id, userId, '作成中の記事を取りやめました。新しいネタを送ってください。');
+      await line.reply(replyToken, [text(msg)]);
       return;
     }
     // ★新しいネタとして扱わない。いま作っている記事の続きを待たせる
@@ -806,11 +869,27 @@ async function handleText(
 
   // 承認待ちの記事があるなら、この発言は「承認」か「修正指示」
   if (active && (active.state === 'awaiting_approval' || active.state === 'editing')) {
-    if (/^(公開|OK|ok|はい|投稿)/.test(body)) {
+    // ★公開は取り消せないので、はっきりした承認の言葉と完全に一致したときだけ（commands.ts の isPublishApproval）。
+    //   以前の先頭一致では「公開しない」でも公開されていた（2026-11 顧客環境）
+    if (isPublishApproval(body)) {
       return publishAfterAiImageReview(active.id, env, line, d, userId, replyToken);
     }
-    if (/^(下書き|したがき)/.test(body)) {
+    if (isDraftRequest(body)) {
       return doSaveDraft(active.id, line, d, userId, replyToken);
+    }
+    // 「公開しない」「まだ」だけの返事は、書き直しに回さない（意味の無い書き直しで AI の費用を使わない）
+    if (isHoldRequest(body)) {
+      await line.reply(replyToken, [textWithActions(
+        '公開はしていません。記事はこのまま預かっています。\n\n' +
+        '直したいところがあれば、そのまま文章で送ってください。\n' +
+        '公開するときは「公開する」、やめるときは「やめる」と送ってください。',
+        [
+          { label: '公開する', data: `action=publish&id=${active.id}` },
+          { label: '下書きに保存する', data: `action=savedraft&id=${active.id}` },
+          { label: 'やめる', data: `action=cancel&id=${active.id}` },
+        ],
+      )]);
+      return;
     }
     if (/^(全文|本文|ぜんぶん|読みたい|見せて)/.test(body)) {
       await line.reply(replyToken, buildFullText({
@@ -823,9 +902,9 @@ async function handleText(
       }));
       return;
     }
-    if (/^(やめ|キャンセル|中止|いいえ)/.test(body)) {
-      await d.db.setState(active.id, active.state, 'cancelled', `line:${userId}`);
-      await line.reply(replyToken, [text('この記事は取りやめました。')]);
+    if (isCancelRequest(body)) {
+      const msg = await cancelOrRevert(d, active.id, userId, 'この記事は取りやめました。');
+      await line.reply(replyToken, [text(msg)]);
       return;
     }
     return handleRevision(active.id, body, env, line, d, replyToken, userId);
@@ -857,6 +936,17 @@ function buildPendingNotice(a: { id: string; title: string | null; state: string
       { label: 'やめる', data: `action=cancel&id=${a.id}` },
     ],
   );
+}
+
+/**
+ * 「やめる」。note に一度出た記事（公開済み・下書き保存済み）の修正なら、取りやめずに元の状態と中身に戻す。
+ * 新しく作っている記事は取りやめ（cancelledText で返事）。
+ * ★拡張に渡した仕事も引き上げる。放っておくと後から勝手に投稿される
+ */
+async function cancelOrRevert(d: ServiceDeps, articleId: string, userId: string, cancelledText: string): Promise<string> {
+  await withdrawJobs(d, articleId);
+  const outcome = await revertOrCancel(d, articleId, `line:${userId}`);
+  return outcome.kind === 'cancelled' ? cancelledText : cancelReplyText(outcome);
 }
 
 /** 記事のネタ入力を待つ状態にする。 */
@@ -963,6 +1053,12 @@ async function handlePostback(
     case 'menu_profile':
       return showContext(env, line, d, replyToken, userId);
 
+    case 'ctx_view':
+      return showContextFull(env, line, d, replyToken, userId);
+
+    case 'ctx_modify':
+      return showContextModify(env, line, d, replyToken, userId);
+
     // ★管理者の承認・外しは持ち主だけ（管理者は管理者を増やせない・外せない）
     case 'admin_approve':
       if (!isOwner(d.ownerLineUserId, userId)) return ownerOnly(line, replyToken);
@@ -1032,7 +1128,10 @@ async function handlePostback(
       return;
 
     case 'ctx_replace':
-      if (!power(d, userId)) return ownerOnly(line, replyToken);
+      if (!power(d, userId)) {
+        await line.reply(replyToken, [text(KNOWLEDGE_POWER_ONLY_MESSAGE)]);
+        return;
+      }
       await setMode(env.KV, DEFAULT_TENANT_ID, userId, { kind: 'ctx_new' });
       await line.reply(replyToken, [textWithActions(
         '新しい内容を送ってください。いまの設定は置き換わります。',
@@ -1046,7 +1145,10 @@ async function handlePostback(
       return;
 
     case 'ctx_clear':
-      if (!power(d, userId)) return ownerOnly(line, replyToken);
+      if (!power(d, userId)) {
+        await line.reply(replyToken, [text(KNOWLEDGE_POWER_ONLY_MESSAGE)]);
+        return;
+      }
       await clearMode(env.KV, DEFAULT_TENANT_ID, userId);
       await d.db.clearContext(DEFAULT_TENANT_ID);
       await auditIfAdmin(d, userId, 'knowledge.cleared');
@@ -1054,7 +1156,10 @@ async function handlePostback(
       return;
 
     case 'ctx_delete': {
-      if (!power(d, userId)) return ownerOnly(line, replyToken);
+      if (!power(d, userId)) {
+        await line.reply(replyToken, [text(KNOWLEDGE_POWER_ONLY_MESSAGE)]);
+        return;
+      }
       const current = await d.db.getActiveContext(DEFAULT_TENANT_ID);
       const entries = current ? listEntries(current.raw_text) : [];
       if (entries.length === 0) {
@@ -1062,36 +1167,14 @@ async function handlePostback(
         return;
       }
       await setMode(env.KV, DEFAULT_TENANT_ID, userId, { kind: 'ctx_delete' });
-      await line.reply(replyToken, [{
-        type: 'text',
-        text: '消したいものの番号を送ってください。\n（一覧は「ナレッジ」で見られます）',
-        quickReply: {
-          items: [
-            ...entries.slice(0, 12).map((_, i) => ({
-              type: 'action' as const,
-              action: { type: 'message' as const, label: String(i + 1), text: String(i + 1) },
-            })),
-            { type: 'action' as const, action: { type: 'postback' as const, label: 'やめる', data: 'action=ctx_cancel', displayText: 'やめる' } },
-          ],
-        },
-      }]);
+      await line.reply(replyToken, [buildKnowledgeDeletePicker(current!.raw_text)]);
       return;
     }
 
-    case 'ctx_full': {
-      const current = await d.db.getActiveContext(DEFAULT_TENANT_ID);
-      if (!current) {
-        await line.reply(replyToken, [text('まだ何も覚えていません。')]);
-        return;
-      }
-      // LINE の1通の上限に収まるよう、必要なら分けて送る
-      const chunks = splitForLine(current.raw_text);
-      await line.reply(replyToken, chunks.slice(0, 5).map((c) => text(c)));
-      return;
-    }
-
+    // ★以前の「全文を見る」「一覧を見る」ボタン（送信済みのメッセージに残っている）も、確認画面へ
+    case 'ctx_full':
     case 'ctx_edit':
-      return showContext(env, line, d, replyToken, userId);
+      return showContextFull(env, line, d, replyToken, userId);
 
     // ★サムネの設定は費用に直結するので持ち主だけ
     case 'thumb_auto': {
@@ -1167,11 +1250,8 @@ async function handlePostback(
     }
 
     case 'cancel': {
-      const a = await d.db.getArticle(articleId);
-      // ★拡張に渡した仕事も引き上げる。放っておくと後から勝手に投稿される
-      await withdrawJobs(d, articleId);
-      if (a) await d.db.setState(articleId, a.state, 'cancelled', `line:${userId}`);
-      await line.reply(replyToken, [text('この記事は取りやめました。')]);
+      const msg = await cancelOrRevert(d, articleId, userId, 'この記事は取りやめました。');
+      await line.reply(replyToken, [text(msg)]);
       return;
     }
 
@@ -1369,6 +1449,15 @@ async function publishAfterAiImageReview(
 async function doPublish(
   articleId: string, env: Env, line: LineClient, d: ServiceDeps, userId: string, replyToken: string,
 ): Promise<void> {
+  // ★書き直しの最中に古いプレビューの「公開する」が押されたら、何が起きているかを伝える
+  //   （以前は「まだ公開できる状態ではありません」だけで、理由が分からなかった）
+  {
+    const notReady = notReadyToPublishMessage((await d.db.getArticle(articleId))?.state);
+    if (notReady) {
+      await line.reply(replyToken, [text(notReady)]);
+      return;
+    }
+  }
   // ★承認できるのはオーナーだけ
   const approval = await approve(d, articleId, userId);
   if (!approval.allowed) {
@@ -1567,6 +1656,10 @@ async function handleRevision(
   }
 
   // 本文の書き直しが必要なものは再生成に回す
+  // ★「先程追加したナレッジを元に修正」「ライン公式などのリンクを追加して」のような本文の直しは、
+  //   分類の指示文（classifyRevision）を補強して regenerate_all に入るようにした（2026-11 顧客環境）。
+  //   unknown を一律に書き直しへ回すと「ありがとう」「公開されましたか」でも AI の費用が走るので、unknown は聞き返す
+  //   （2026-11 源蔵レビュー必須2）
   if (intent.action === 'regenerate_all' || intent.action === 'rewrite_section' || intent.action === 'change_title') {
     // ★状態は awaiting_approval → editing を通す（generating へ直接飛ばすと遷移表に弾かれる）
     await requestRewrite(d, articleId, instruction);
@@ -1577,42 +1670,58 @@ async function handleRevision(
     return;
   }
 
-  await line.reply(replyToken, [textWithActions(
-    '指示の内容が分かりませんでした。もう少し具体的に教えてください。',
-    [{ label: 'このまま公開する', data: `action=publish&id=${articleId}` }],
+  // ★「このまま公開する」ボタンは付けない（分からなかった返事の横に、取り消せない操作を置かない・源蔵レビュー必須2）
+  await line.reply(replyToken, [text(
+    '指示の内容が分かりませんでした。直したいところを、もう少し具体的に教えてください。\n\n' +
+    '例:\n・■2をもっと具体的に書き直して\n・タイトルを別の案にして\n・文末にLINE公式のリンクを追加して\n' +
+    '・登録したナレッジに合わせて書き直して\n・画像2を■3の下に移して\n\n' +
+    '公開するときは「公開する」、やめるときは「やめる」と送ってください。',
   )]);
 }
 
 
 // ── 事業コンテキスト ────────────────────────────────────
-/** 現在の設定を見せる。追記・書き換え・削除を選ばせる。 */
+/**
+ * 「ナレッジ」（リッチメニュー）: 確認するか修正するかを選ばせる。
+ * ★2026-11 入口を2つに分けた。リッチメニューの画像は1区画のまま（差し替えない）。
+ */
 async function showContext(env: Env, line: LineClient, d: ServiceDeps, replyToken: string, userId: string): Promise<void> {
   const current = await d.db.getActiveContext(DEFAULT_TENANT_ID);
+  if (!current) return startFirstContext(env, line, replyToken, userId);
+  // 前の操作の入力待ちが残っていると、次の文章を取り違えるので消しておく
+  await clearMode(env.KV, DEFAULT_TENANT_ID, userId);
+  await line.reply(replyToken, [buildKnowledgeHub(listEntries(current.raw_text).length)]);
+}
 
+/** まだ何も覚えていないとき。次に送った文章をそのまま覚える */
+async function startFirstContext(env: Env, line: LineClient, replyToken: string, userId: string): Promise<void> {
+  await setMode(env.KV, DEFAULT_TENANT_ID, userId, { kind: 'ctx_append' });
+  await line.reply(replyToken, [buildKnowledgeFirst()]);
+}
+
+/** 「ナレッジを確認」: LINE 上でそのまま全文を見せる（コード不要・投稿者も可） */
+async function showContextFull(env: Env, line: LineClient, d: ServiceDeps, replyToken: string, userId: string): Promise<void> {
+  const current = await d.db.getActiveContext(DEFAULT_TENANT_ID);
   if (!current) {
-    await setMode(env.KV, DEFAULT_TENANT_ID, userId, { kind: 'ctx_append' });
     await line.reply(replyToken, [textWithActions(
-      'ここに書いたことは、これから作る記事すべての前提になります。\n' +
-      '思いついたものから、どんどん送ってください。あとから足していけます。\n\n' +
-      'たとえば こんなこと:\n' +
-      '・何をやっているか、どんなお客さんが来るか\n' +
-      '・使っている材料、こだわり、店の決まりごと\n' +
-      '・「文末に https://... のリンクを貼る」のような毎回のルール\n' +
-      '・「店主は大将と書く」のような呼び方の指定\n\n' +
-      '次に送るメッセージをそのまま覚えます。',
-      [{ label: 'やめる', data: 'action=ctx_cancel' }],
+      'まだ何も覚えていません。\n「書き足す」を押して、お店や事業のことを送ってください。',
+      [{ label: '書き足す', data: 'action=ctx_modify' }],
     )]);
     return;
   }
-
-  await line.reply(replyToken, [buildKnowledgeList(current.raw_text, power(d, userId))]);
+  await clearMode(env.KV, DEFAULT_TENANT_ID, userId);
+  await line.reply(replyToken, buildKnowledgeFull(current.raw_text, power(d, userId)));
 }
 
-/** LINE の1通の上限に収まるよう、長い文章を切り分ける。 */
-function splitForLine(textBody: string, size = 1800): string[] {
-  const out: string[] = [];
-  for (let i = 0; i < textBody.length; i += size) out.push(textBody.slice(i, i + size));
-  return out.length > 0 ? out : [''];
+/**
+ * 「ナレッジを修正」: できることを示し、既定は「送った文章を書き足す」。
+ * ★消す・入れ替えるは持ち主・管理者だけ（投稿者には出さない）。
+ */
+async function showContextModify(env: Env, line: LineClient, d: ServiceDeps, replyToken: string, userId: string): Promise<void> {
+  const current = await d.db.getActiveContext(DEFAULT_TENANT_ID);
+  if (!current) return startFirstContext(env, line, replyToken, userId);
+  await setMode(env.KV, DEFAULT_TENANT_ID, userId, { kind: 'ctx_append' });
+  await line.reply(replyToken, [buildKnowledgeModify(listEntries(current.raw_text).length, power(d, userId))]);
 }
 
 /**
@@ -1648,47 +1757,15 @@ async function deleteContextEntry(
   const contextId = await d.db.saveContext(DEFAULT_TENANT_ID, rest, null, buildProvisionalSnippet(rest));
   await line.reply(replyToken, [textWithActions(
     `消しました。（残り${listEntries(rest).length}件）\n\n` +
-    `消したもの: ${removed.length > 40 ? `${removed.slice(0, 40)}…` : removed}`,
-    [{ label: '一覧を見る', data: 'action=ctx_edit' }],
+    `消したもの: ${removed.length > 40 ? `${removed.slice(0, 40)}…` : removed}` +
+    (index <= listEntries(rest).length ? `\n\n${index}番より後ろの番号が、1つずつ繰り上がりました。` : ''),
+    [{ label: 'ナレッジを確認', data: 'action=ctx_view' }, { label: 'さらに修正する', data: 'action=ctx_modify' }],
   )]);
   try {
     await env.GENERATE.create({ params: { kind: 'knowledge', contextId, lineUserId: userId, announce: false } });
   } catch (e) {
     log.warn('ナレッジの整理を始められませんでした', String(e));
   }
-}
-
-/** 溜まっているメモを連番で見せる。長いものは折りたたむ。 */
-/** @param canEdit 消す・入れ替えるを出すか（持ち主だけ） */
-function buildKnowledgeList(rawText: string, canEdit = true): LineMessage {
-  const entries = listEntries(rawText);
-  const shown = entries.slice(0, 20);
-  const lines = shown.map((e, i) => {
-    const body = e.replace(/\n/g, ' ');
-    const clipped = body.length > 64 ? `${body.slice(0, 64)}…` : body;
-    return `${String(i + 1).padStart(2, ' ')}. ${clipped}`;
-  });
-
-  return {
-    type: 'text',
-    text:
-      `【覚えていること】${entries.length}件\n\n` +
-      lines.join('\n') +
-      (entries.length > shown.length ? `\n\n（ほか ${entries.length - shown.length} 件）` : '') +
-      '\n\n────────\n' +
-      'そのまま送ると書き足します。',
-    quickReply: {
-      items: [
-        { type: 'action', action: { type: 'postback', label: '書き足す', data: 'action=ctx_append', displayText: '書き足す' } },
-        ...(canEdit ? [{ type: 'action', action: { type: 'postback', label: '1件消す', data: 'action=ctx_delete', displayText: '1件消す' } }] : []),
-        { type: 'action', action: { type: 'postback', label: '全文を見る', data: 'action=ctx_full', displayText: '全文を見る' } },
-        ...(canEdit ? [
-          { type: 'action', action: { type: 'postback', label: '入れ替える', data: 'action=ctx_replace', displayText: '入れ替える' } },
-          { type: 'action', action: { type: 'postback', label: '全部消す', data: 'action=ctx_clear', displayText: '全部消す' } },
-        ] : []),
-      ],
-    },
-  };
 }
 
 /**
